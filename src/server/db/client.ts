@@ -1,6 +1,7 @@
 import {Kysely, PostgresDialect} from 'kysely';
 import type {DB} from './schema.generated.ts';
 import {Pool} from 'pg';
+import type {ModelMessage} from 'ai';
 
 const db = new Kysely<DB>({
   dialect: new PostgresDialect({
@@ -90,17 +91,13 @@ export const deleteChat = async (chatId: number) => {
 };
 
 // Message operations
-export const insertMessage = async (
-  chatId: number,
-  role: string,
-  content: string,
-) => {
+export const insertMessage = async (chatId: number, message: ModelMessage) => {
   const result = await db
     .insertInto('chat_messages')
     .values({
       chat_id: chatId,
-      role,
-      content,
+      role: message.role,
+      content: JSON.stringify(message.content),
     })
     .returningAll()
     .executeTakeFirst();
@@ -108,22 +105,34 @@ export const insertMessage = async (
 };
 
 export const getMessagesByChatId = async (chatId: number) => {
-  return await db
+  const messages = await db
     .selectFrom('chat_messages')
     .selectAll()
     .where('chat_id', '=', chatId)
     .orderBy('created_at', 'asc')
     .execute();
+
+  return messages.map(msg => ({
+    ...msg,
+    content: JSON.parse(msg.content),
+  }));
 };
 
 export const getLatestMessageByChatId = async (chatId: number) => {
-  return await db
+  const message = await db
     .selectFrom('chat_messages')
     .selectAll()
     .where('chat_id', '=', chatId)
     .orderBy('created_at', 'desc')
     .limit(1)
     .executeTakeFirst();
+
+  if (!message) return null;
+
+  return {
+    ...message,
+    content: JSON.parse(message.content),
+  };
 };
 
 export const deleteMessagesByChatId = async (chatId: number) => {
@@ -147,17 +156,16 @@ export const getChatWithMessages = async (chatId: number) => {
 
 export const createChatWithFirstMessage = async (
   userId: string,
-  role: string,
-  content: string,
+  message: ModelMessage,
   title?: string,
 ) => {
   const chat = await createChat(userId, title);
   if (!chat) throw new Error('Failed to create chat');
 
-  const message = await insertMessage(chat.id, role, content);
+  const insertedMessage = await insertMessage(chat.id, message);
   return {
     chat,
-    message,
+    message: insertedMessage,
   };
 };
 

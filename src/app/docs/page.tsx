@@ -31,11 +31,10 @@ export default function DocumentsPage() {
   });
 
   const createMutation = trpc.documents.create.useMutation({
-    onSuccess: data => {
+    onSuccess: () => {
       setIsCreating(false);
       setNewDocTitle('');
       refetch();
-      router.push(`/docs/${data.id}`);
     },
   });
 

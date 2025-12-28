@@ -20,7 +20,6 @@ import {Input} from '~/components/ui/input';
 import {ScrollArea} from '~/components/ui/scroll-area';
 import {Avatar, AvatarFallback} from '~/components/ui/avatar';
 import {Badge} from '~/components/ui/badge';
-import {apiHooks} from '~/lib/api';
 
 interface ToolCall {
   id: string;
@@ -78,11 +77,6 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
-  // tRPC mutations for document operations
-  const createDocMutation = apiHooks.documents.create.useMutation();
-  const updateDocMutation = apiHooks.documents.update.useMutation();
-  const utils = apiHooks.useUtils();
-
   // Load chat from localStorage on mount
   useEffect(() => {
     const savedChat = localStorage.getItem('currentChat');
@@ -93,7 +87,7 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
           parsed.messages.map((msg: Message) => ({
             ...msg,
             timestamp: new Date(msg.timestamp),
-          }))
+          })),
         );
         setChatId(parsed.chatId);
       } catch (error) {
@@ -105,13 +99,7 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
   // Save chat to localStorage whenever messages or chatId changes
   useEffect(() => {
     if (messages.length > 0 || chatId) {
-      localStorage.setItem(
-        'currentChat',
-        JSON.stringify({
-          messages,
-          chatId,
-        })
-      );
+      localStorage.setItem('currentChat', JSON.stringify({messages, chatId}));
     }
   }, [messages, chatId]);
 
@@ -141,110 +129,6 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
-    }
-  };
-</text>
-
-<old_text line=352>
-  return (
-    <div className={`flex flex-col h-full border-l bg-background ${className}`}>
-      <div className="p-4 border-b">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="h-5 w-5" />
-          <h2 className="text-lg font-semibold">AI Assistant</h2>
-        </div>
-        <p className="text-xs text-muted-foreground mt-1">
-          Ask questions about your documents
-        </p>
-        {chatId && (
-          <p className="text-xs text-muted-foreground mt-1">
-            Chat ID: {chatId}
-          </p>
-        )}
-      </div>
-
-  // Execute tool calls
-  const executeToolCall = async (toolCall: ToolCall): Promise<ToolCall> => {
-    try {
-      let result;
-
-      switch (toolCall.name) {
-        case 'createDocument':
-          result = await createDocMutation.mutateAsync({
-            title: toolCall.args.title as string,
-            content: toolCall.args.content as string,
-          });
-          return {
-            ...toolCall,
-            status: 'success',
-            result: {
-              success: true,
-              documentId: result.id,
-              message: `Document "${result.title}" created successfully`,
-            },
-          };
-
-        case 'updateDocument':
-          result = await updateDocMutation.mutateAsync({
-            id: toolCall.args.id as number,
-            title: toolCall.args.title as string,
-            content: toolCall.args.content as string,
-          });
-          return {
-            ...toolCall,
-            status: 'success',
-            result: {
-              success: true,
-              message: `Document "${result!.title}" updated successfully`,
-            },
-          };
-
-        case 'getDocument':
-          try {
-            const docResult = await utils.client.documents.getById.query({
-              id: toolCall.args.id as number,
-            });
-            return {
-              ...toolCall,
-              status: 'success',
-              result: {
-                success: true,
-                document: {
-                  id: docResult.id,
-                  title: docResult.title,
-                  content: docResult.content,
-                },
-              },
-            };
-          } catch (error) {
-            console.error(error);
-            return {
-              ...toolCall,
-              status: 'success',
-              result: {
-                success: false,
-                message: 'Document not found',
-              },
-            };
-          }
-
-        default:
-          return {
-            ...toolCall,
-            status: 'error',
-            result: {success: false, message: 'Unknown tool'},
-          };
-      }
-    } catch (error) {
-      return {
-        ...toolCall,
-        status: 'error',
-        result: {
-          success: false,
-          message:
-            error instanceof Error ? error.message : 'Tool execution failed',
-        },
-      };
     }
   };
 
@@ -354,7 +238,8 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
                   id: parsed.toolCall.id,
                   name: parsed.toolCall.name,
                   args: parsed.toolCall.args,
-                  status: 'pending',
+                  status: parsed.toolCall.status || 'success',
+                  result: parsed.toolCall.result,
                 };
                 collectedToolCalls.push(toolCall);
                 setStreamingToolCalls([...collectedToolCalls]);
@@ -366,23 +251,15 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
               }
 
               if (parsed.done) {
-                // Execute all tool calls
-                const executedToolCalls: ToolCall[] = [];
-                for (const toolCall of collectedToolCalls) {
-                  const executed = await executeToolCall(toolCall);
-                  executedToolCalls.push(executed);
-                  setStreamingToolCalls([...executedToolCalls]);
-                }
-
-                // Finalize the assistant message
+                // Finalize the assistant message with tool calls from backend
                 const assistantMessage: Message = {
                   id: (Date.now() + 1).toString(),
                   role: 'assistant',
                   content: accumulatedContent,
                   timestamp: new Date(),
                   toolCalls:
-                    executedToolCalls.length > 0
-                      ? executedToolCalls
+                    collectedToolCalls.length > 0
+                      ? collectedToolCalls
                       : undefined,
                 };
                 setMessages(prev => [...prev, assistantMessage]);

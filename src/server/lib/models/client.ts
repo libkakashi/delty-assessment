@@ -127,7 +127,7 @@ class LLMClient {
     temp?: number,
     tools?: Record<string, Tool>,
   ) {
-    console.log(messages);
+    console.log('Starting genTextStream with tools:', Object.keys(tools || {}));
     const queue = new Queue<string | ToolCall>();
     const model = getModel(this.#model);
 
@@ -136,41 +136,114 @@ class LLMClient {
         ? [{role: 'user', content: messages}]
         : messages;
 
-    const stream = streamText({
-      model,
-      messages,
-      temperature: temp || this.#temp,
-      // tools,
-    });
-
     const data = async () => {
-      let text = '';
-      const toolCalls: ToolCall[] = [];
+      let allText = '';
+      let currentMessages = [...messages];
+      const maxIterations = 5;
+      let iteration = 0;
 
-      for await (const chunk of stream.textStream) {
-        console.log('chunk');
-        text += chunk;
-        queue.push(chunk);
+      while (iteration < maxIterations) {
+        iteration++;
+        console.log(`Iteration ${iteration}`);
+
+        const streamResult = streamText({
+          model,
+          messages: currentMessages,
+          temperature: temp || this.#temp,
+          tools,
+        });
+
+        // Stream text chunks
+        for await (const chunk of streamResult.textStream) {
+          console.log('text chunk');
+          allText += chunk;
+          queue.push(chunk);
+        }
+
+        // Wait for tool calls
+        const toolCalls = await streamResult.toolCalls;
+
+        if (toolCalls && toolCalls.length > 0) {
+          console.log(`Executing ${toolCalls.length} tool calls`);
+
+          // Push tool calls to queue for client notification
+          for (const tc of toolCalls) {
+            const toolCall: ToolCall = {
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.input as Record<string, unknown>,
+            };
+            queue.push(toolCall);
+          }
+
+          // Execute tools and collect results
+          const toolResults: Array<{
+            toolCallId: string;
+            toolName: string;
+            result: unknown;
+          }> = [];
+
+          for (const tc of toolCalls) {
+            const tool = tools?.[tc.toolName];
+            if (tool && tool.execute) {
+              try {
+                console.log(`Executing tool: ${tc.toolName}`);
+                const result = await tool.execute(
+                  tc.input as never,
+                  {} as never,
+                );
+                toolResults.push({
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  result,
+                });
+              } catch (error) {
+                console.error(`Error executing tool ${tc.toolName}:`, error);
+                toolResults.push({
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  result: {error: String(error)},
+                });
+              }
+            }
+          }
+
+          // Build next messages with tool results
+          currentMessages = [
+            ...currentMessages,
+            {
+              role: 'assistant' as const,
+              content: toolCalls.map(tc => ({
+                type: 'tool-call' as const,
+                toolCallId: tc.toolCallId,
+                toolName: tc.toolName,
+                input: tc.input,
+              })),
+            } as unknown as ModelMessage,
+            {
+              role: 'tool' as const,
+              content: toolResults.map(tr => ({
+                type: 'tool-result' as const,
+                toolCallId: tr.toolCallId,
+                toolName: tr.toolName,
+                output: JSON.stringify(tr.result),
+              })),
+            } as unknown as ModelMessage,
+          ];
+
+          // Continue to next iteration to get AI's response to tool results
+          continue;
+        } else {
+          // No more tool calls, we're done
+          console.log('No tool calls, finishing');
+          break;
+        }
       }
 
-      // After text stream completes, check for tool calls
-      // const result = await stream;
-
-      // if (result.toolCalls && result.toolCalls.length > 0) {
-      //   for (const toolCall of result.toolCalls) {
-      //     const call: ToolCall = {
-      //       toolCallId: toolCall.toolCallId,
-      //       toolName: toolCall.toolName,
-      //       args: toolCall.args as Record<string, unknown>,
-      //     };
-      //     toolCalls.push(call);
-      //     queue.push(call);
-      //   }
-      // }
-
       queue.end();
-      return {text, toolCalls};
+      return {text: allText, toolCalls: []};
     };
+
     return {queue, data};
   }
 
