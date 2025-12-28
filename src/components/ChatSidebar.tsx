@@ -162,56 +162,31 @@ function ToolInvocationCard({
 }: {
   toolInvocation: ToolInvocation;
 }) {
+  // Format tool name for display (e.g., "createDocument" -> "Create Document")
+  const formatToolName = (name: string) => {
+    return name
+      .replace(/([A-Z])/g, ' $1')
+      .replace(/^./, str => str.toUpperCase())
+      .trim();
+  };
+
   return (
-    <div className="w-full rounded-lg border bg-card p-3 text-card-foreground shadow-sm">
-      {/* Tool Header */}
-      <div className="mb-2 flex items-center gap-2">
-        <div className="flex items-center gap-1.5">
-          {toolInvocation.state === 'call' && (
-            <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
-          )}
-          {toolInvocation.state === 'result' && (
-            <CheckCircle className="h-4 w-4 text-green-500" />
-          )}
-          {toolInvocation.state === 'error' && (
-            <AlertCircle className="h-4 w-4 text-red-500" />
-          )}
-          <span className="text-xs font-semibold">
-            {toolInvocation.toolName}
-          </span>
-        </div>
-      </div>
-
-      {/* Tool Input */}
-      <div className="mb-2 rounded bg-muted/50 p-2">
-        <p className="mb-1 text-xs font-medium text-muted-foreground">Input:</p>
-        <pre className="overflow-x-auto text-xs">
-          {typeof toolInvocation.args === 'string'
-            ? toolInvocation.args
-            : JSON.stringify(toolInvocation.args, null, 2)}
-        </pre>
-      </div>
-
-      {/* Tool Result */}
-      {toolInvocation.state === 'result' &&
-        toolInvocation.result !== undefined && (
-          <div className="rounded bg-muted/50 p-2">
-            <p className="mb-1 text-xs font-medium text-muted-foreground">
-              Result:
-            </p>
-            <pre className="overflow-x-auto text-xs">
-              {(() => {
-                try {
-                  return typeof toolInvocation.result === 'string'
-                    ? toolInvocation.result
-                    : JSON.stringify(toolInvocation.result, null, 2);
-                } catch {
-                  return String(toolInvocation.result);
-                }
-              })()}
-            </pre>
-          </div>
-        )}
+    <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+      {toolInvocation.state === 'call' && (
+        <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+      )}
+      {toolInvocation.state === 'result' && (
+        <CheckCircle className="h-4 w-4 text-green-500" />
+      )}
+      {toolInvocation.state === 'error' && (
+        <AlertCircle className="h-4 w-4 text-red-500" />
+      )}
+      <span className="text-muted-foreground">
+        {toolInvocation.state === 'call' ? 'Calling' : 'Called'}{' '}
+        <span className="font-medium text-foreground">
+          {formatToolName(toolInvocation.toolName)}
+        </span>
+      </span>
     </div>
   );
 }
@@ -557,7 +532,10 @@ export default function ChatSidebar({className = ''}: ChatSidebarProps) {
       </div>
 
       {/* Messages Area */}
-      <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
+      <ScrollArea
+        className="flex-1 overflow-y-auto p-4 [&>div>div]:!block"
+        ref={scrollAreaRef}
+      >
         <div className="space-y-4">
           {messages.length === 0 && <EmptyState />}
 

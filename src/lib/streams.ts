@@ -27,6 +27,7 @@ export interface StreamResult {
 
 /**
  * Send a chat request and process the streaming response using fetchEventSource
+ * Handles EventSourceWriter format with event labels: text, tool-call, tool-result, meta, done, error
  */
 export async function sendChatStream(
   messages: AIMessage[],
@@ -36,9 +37,11 @@ export async function sendChatStream(
 ): Promise<StreamResult> {
   const toolInvocationsMap = new Map<string, ToolInvocation>();
   let resultChatId: string | null = chatId;
+  const processed: {[key: number]: boolean | undefined} = {};
 
   return new Promise<StreamResult>((resolve, reject) => {
     const controller = new AbortController();
+    let rejected = false;
 
     // Link external abort signal if provided
     if (abortSignal) {
@@ -66,6 +69,7 @@ export async function sendChatStream(
           callbacks.onError?.(error);
           reject(error);
           controller.abort();
+          rejected = true;
           return;
         }
 
@@ -77,56 +81,83 @@ export async function sendChatStream(
       },
 
       onmessage(event) {
+        if (rejected) return;
         if (!event.data) return;
+
+        // Handle done event
+        if (event.event === 'done') {
+          callbacks.onComplete?.(resultChatId);
+          resolve({chatId: resultChatId});
+          return;
+        }
 
         try {
           const data = JSON.parse(event.data);
 
-          switch (data.type) {
-            case 'text-delta': {
-              callbacks.onTextDelta?.(data.text);
+          // Dedupe by index
+          if (data.index !== undefined && processed[data.index]) {
+            return;
+          }
+          if (data.index !== undefined) {
+            processed[data.index] = true;
+          }
+
+          switch (event.event) {
+            case 'text': {
+              // Text delta from EventSourceWriter: { chunk: string, index: number }
+              const text = data.chunk;
+              if (typeof text === 'string') {
+                callbacks.onTextDelta?.(text);
+              }
               break;
             }
 
             case 'tool-call': {
-              const toolInvocation: ToolInvocation = {
-                toolCallId: data.toolCallId,
-                toolName: data.toolName,
-                args: data.input ?? {},
-                state: 'call',
-              };
-              toolInvocationsMap.set(data.toolCallId, toolInvocation);
-              callbacks.onToolCall?.(toolInvocation);
+              // Tool call: { chunk: { type, toolCallId, toolName, input }, index }
+              const chunk = data.chunk;
+              if (chunk && chunk.toolCallId) {
+                const toolInvocation: ToolInvocation = {
+                  toolCallId: chunk.toolCallId,
+                  toolName: chunk.toolName,
+                  args: chunk.input ?? {},
+                  state: 'call',
+                };
+                toolInvocationsMap.set(chunk.toolCallId, toolInvocation);
+                callbacks.onToolCall?.(toolInvocation);
+              }
               break;
             }
 
             case 'tool-result': {
-              const existing = toolInvocationsMap.get(data.toolCallId);
-              if (existing) {
-                existing.state = 'result';
-                existing.result = data.output;
-                callbacks.onToolResult?.(existing);
-              } else {
-                // Create new tool invocation for orphaned results
-                const toolInvocation: ToolInvocation = {
-                  toolCallId: data.toolCallId,
-                  toolName: data.toolName,
-                  args: data.input ?? {},
-                  state: 'result',
-                  result: data.output,
-                };
-                toolInvocationsMap.set(data.toolCallId, toolInvocation);
-                callbacks.onToolResult?.(toolInvocation);
+              // Tool result: { chunk: { type, toolCallId, toolName, output }, index }
+              const chunk = data.chunk;
+              if (chunk && chunk.toolCallId) {
+                const existing = toolInvocationsMap.get(chunk.toolCallId);
+                if (existing) {
+                  existing.state = 'result';
+                  existing.result = chunk.output;
+                  callbacks.onToolResult?.(existing);
+                } else {
+                  // Create new tool invocation for orphaned results
+                  const toolInvocation: ToolInvocation = {
+                    toolCallId: chunk.toolCallId,
+                    toolName: chunk.toolName,
+                    args: {},
+                    state: 'result',
+                    result: chunk.output,
+                  };
+                  toolInvocationsMap.set(chunk.toolCallId, toolInvocation);
+                  callbacks.onToolResult?.(toolInvocation);
+                }
               }
               break;
             }
 
-            case 'done': {
+            case 'meta': {
+              // Meta event with chatId
               if (data.chatId) {
                 resultChatId = String(data.chatId);
               }
-              callbacks.onComplete?.(resultChatId);
-              resolve({chatId: resultChatId});
               break;
             }
 
@@ -134,6 +165,7 @@ export async function sendChatStream(
               const error = new Error(data.message || 'Stream error');
               callbacks.onError?.(error);
               reject(error);
+              rejected = true;
               break;
             }
           }
@@ -143,17 +175,20 @@ export async function sendChatStream(
       },
 
       onerror(error) {
+        if (rejected) return;
         console.error('[streams] SSE error:', error);
         callbacks.onError?.(
           error instanceof Error ? error : new Error('Stream error'),
         );
-        // Don't reject here - let fetchEventSource retry or close naturally
-        throw error; // This tells fetchEventSource to stop retrying
+        // Throw to stop retrying
+        throw error;
       },
 
       onclose() {
-        // Stream closed without 'done' event - resolve anyway
-        resolve({chatId: resultChatId});
+        // Stream closed - resolve if not already done
+        if (!rejected) {
+          resolve({chatId: resultChatId});
+        }
       },
     });
   });

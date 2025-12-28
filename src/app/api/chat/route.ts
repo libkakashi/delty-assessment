@@ -14,6 +14,7 @@ import {
   getDocumentsByUserId,
 } from '~/server/db/client';
 import {major} from '~/server/lib/models';
+import {EventSourceWriter} from '~/server/utils';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -215,81 +216,49 @@ export async function POST(req: NextRequest) {
       '[CHAT API] genTextStream returned, creating readable stream...',
     );
 
-    // Create a readable stream in SSE format for fetchEventSource
-    const stream = new ReadableStream({
-      async start(controller) {
-        console.log('[CHAT API] Stream start() called');
-        let chunkCount = 0;
-        const encoder = new TextEncoder();
+    // Create EventSourceWriter for SSE streaming
+    const sseWriter = new EventSourceWriter();
 
-        // Helper to send SSE formatted data
-        const sendSSE = (eventData: object) => {
-          const sseMessage = `data: ${JSON.stringify(eventData)}\n\n`;
-          controller.enqueue(encoder.encode(sseMessage));
-        };
-
-        try {
-          console.log('[CHAT API] Starting to read from queue...');
-          for await (const chunk of queue) {
-            chunkCount++;
-            if (typeof chunk === 'string') {
-              console.log(
-                `[CHAT API] Chunk ${chunkCount} (text):`,
-                chunk.slice(0, 50),
-              );
-              // Send text delta as SSE event
-              sendSSE({type: 'text-delta', text: chunk});
-            } else {
-              console.log(
-                `[CHAT API] Chunk ${chunkCount} (tool):`,
-                chunk.type,
-                chunk.toolName,
-              );
-              // Send tool calls/results as SSE event
-              sendSSE(chunk);
-            }
-          }
-
-          console.log('[CHAT API] Queue exhausted. Total chunks:', chunkCount);
-          console.log('[CHAT API] Waiting for data() to complete...');
-
-          // Store assistant response after streaming completes
-          const text = await data();
-          console.log(
-            '[CHAT API] data() completed. Text length:',
-            text?.length,
-          );
-
-          if (text && currentChatId) {
-            console.log('[CHAT API] Storing assistant message...');
-            await insertMessage(currentChatId, {
-              role: 'assistant',
-              content: text,
-            });
-            await updateChatTimestamp(currentChatId);
-            console.log('[CHAT API] Assistant message stored');
-          }
-
-          // Send done event
-          sendSSE({type: 'done', chatId: currentChatId});
-
-          console.log('[CHAT API] Closing controller...');
-          controller.close();
-          console.log('[CHAT API] Stream complete');
-        } catch (error) {
-          console.error('[CHAT API] Stream error:', error);
-          sendSSE({
-            type: 'error',
-            message: error instanceof Error ? error.message : 'Unknown error',
-          });
-          controller.error(error);
-        }
-      },
+    // Add the queue to the writer with labels for different event types
+    sseWriter.addMixedQueue(queue, {
+      text: 'text',
+      toolCall: 'tool-call',
+      toolResult: 'tool-result',
     });
+
+    // Process the stream and handle completion
+    void (async () => {
+      try {
+        console.log('[CHAT API] Waiting for data() to complete...');
+        const text = await data();
+        console.log('[CHAT API] data() completed. Text length:', text?.length);
+
+        if (text && currentChatId) {
+          console.log('[CHAT API] Storing assistant message...');
+          await insertMessage(currentChatId, {
+            role: 'assistant',
+            content: text,
+          });
+          await updateChatTimestamp(currentChatId);
+          console.log('[CHAT API] Assistant message stored');
+        }
+
+        // Send chatId before flushing
+        await sseWriter.sendEvent('meta', {chatId: currentChatId});
+        await sseWriter.flush();
+        await sseWriter.close();
+        console.log('[CHAT API] Stream complete');
+      } catch (error) {
+        console.error('[CHAT API] Stream error:', error);
+        await sseWriter.sendEvent('error', {
+          message: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    })();
 
     // Return stream response with SSE content type
     console.log('[CHAT API] Returning response with chat ID:', currentChatId);
-    return new Response(stream, {
+    return new Response(sseWriter.readable, {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',

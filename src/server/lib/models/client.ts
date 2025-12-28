@@ -5,6 +5,7 @@ import jju from 'jju';
 import {
   streamText,
   generateText,
+  stepCountIs,
   type ModelMessage,
   type ToolCallPart,
   type ToolResultPart,
@@ -149,7 +150,7 @@ class LLMClient {
       model,
       messages: formattedMessages,
       temperature: temp || this.#temp,
-      ...(tools && {tools}),
+      ...(tools && {tools, stopWhen: stepCountIs(5)}),
     });
 
     console.log('[LLMClient] stream created, starting data processing');
