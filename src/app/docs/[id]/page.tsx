@@ -3,10 +3,15 @@
 import {useState, useEffect} from 'react';
 import {useRouter, useParams} from 'next/navigation';
 import {useUser} from '@clerk/nextjs';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeHighlight from 'rehype-highlight';
+import rehypeRaw from 'rehype-raw';
+
 import {trpc} from '~/components/providers/TRPCProvider';
 import {Button} from '~/components/ui/button';
 import {Input} from '~/components/ui/input';
-import {Loader2, Save, ArrowLeft, Trash2} from 'lucide-react';
+import {Loader2, Save, ArrowLeft, Trash2, Eye, Edit} from 'lucide-react';
 import {Card, CardContent} from '~/components/ui/card';
 import ChatSidebar from '~/components/ChatSidebar';
 
@@ -19,6 +24,7 @@ export default function DocumentEditorPage() {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [hasChanges, setHasChanges] = useState(false);
+  const [isPreview, setIsPreview] = useState(false);
 
   const {
     data: document,
@@ -133,6 +139,23 @@ export default function DocumentEditorPage() {
             </Button>
             <div className="flex gap-2">
               <Button
+                variant="outline"
+                onClick={() => setIsPreview(!isPreview)}
+                className="gap-2"
+              >
+                {isPreview ? (
+                  <>
+                    <Edit className="h-4 w-4" />
+                    Edit
+                  </>
+                ) : (
+                  <>
+                    <Eye className="h-4 w-4" />
+                    Preview
+                  </>
+                )}
+              </Button>
+              <Button
                 variant="destructive"
                 onClick={handleDelete}
                 disabled={deleteMutation.isPending}
@@ -164,23 +187,38 @@ export default function DocumentEditorPage() {
 
           <div className="space-y-4">
             <div>
-              <Input
-                placeholder="Document title..."
-                value={title}
-                onChange={e => handleTitleChange(e.target.value)}
-                className="text-2xl font-bold border-none px-0 focus-visible:ring-0 focus-visible:ring-offset-0"
-                disabled={updateMutation.isPending}
-              />
+              {isPreview ? (
+                <h1 className="text-2xl font-bold px-0">{title}</h1>
+              ) : (
+                <Input
+                  placeholder="Document title..."
+                  value={title}
+                  onChange={e => handleTitleChange(e.target.value)}
+                  className="text-2xl font-bold border-none px-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+                  disabled={updateMutation.isPending}
+                />
+              )}
             </div>
 
             <div>
-              <textarea
-                placeholder="Start writing..."
-                value={content}
-                onChange={e => handleContentChange(e.target.value)}
-                className="w-full min-h-[calc(100vh-300px)] p-4 rounded-md border border-input bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-                disabled={updateMutation.isPending}
-              />
+              {isPreview ? (
+                <div className="w-full min-h-[calc(100vh-300px)] p-4 rounded-md border border-input bg-background prose prose-sm max-w-none dark:prose-invert prose-headings:font-bold prose-h1:text-3xl prose-h2:text-2xl prose-h3:text-xl prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-muted prose-pre:p-4 prose-blockquote:border-l-4 prose-blockquote:border-border prose-blockquote:pl-4 prose-img:rounded-md prose-a:text-primary prose-a:no-underline hover:prose-a:underline">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeHighlight, rehypeRaw]}
+                  >
+                    {content}
+                  </ReactMarkdown>
+                </div>
+              ) : (
+                <textarea
+                  placeholder="Start writing..."
+                  value={content}
+                  onChange={e => handleContentChange(e.target.value)}
+                  className="w-full min-h-[calc(100vh-300px)] p-4 rounded-md border border-input bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                  disabled={updateMutation.isPending}
+                />
+              )}
             </div>
           </div>
 
@@ -191,7 +229,7 @@ export default function DocumentEditorPage() {
           )}
         </div>
       </div>
-      <div className="w-96 flex-shrink-0">
+      <div className="w-96 shrink-0">
         <ChatSidebar />
       </div>
     </div>

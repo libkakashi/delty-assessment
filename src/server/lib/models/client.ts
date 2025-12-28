@@ -2,7 +2,13 @@ import {z} from 'zod';
 import Queue from 'superqueue';
 import jju from 'jju';
 
-import {streamText, generateText, type ModelMessage, type Tool} from 'ai';
+import {
+  streamText,
+  generateText,
+  type ModelMessage,
+  type ToolCallPart,
+  type ToolResultPart,
+} from 'ai';
 import {google} from '@ai-sdk/google';
 import {openai} from '@ai-sdk/openai';
 import {anthropic} from '@ai-sdk/anthropic';
@@ -13,18 +19,6 @@ import {
   isGeminiModel,
   isOpenAIModel,
 } from './models';
-
-export type ToolCall = {
-  toolCallId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-};
-
-export type ToolResult = {
-  toolCallId: string;
-  toolName: string;
-  result: unknown;
-};
 
 const getModel = (modelName: ChatModel) => {
   if (isGeminiModel(modelName)) {
@@ -49,14 +43,14 @@ class LLMClient {
   async genText(messages: ModelMessage[] | string, temp?: number) {
     const model = getModel(this.#model);
 
-    messages =
+    const formattedMessages: ModelMessage[] =
       typeof messages === 'string'
         ? [{role: 'user', content: messages}]
         : messages;
 
     const response = await generateText({
       model,
-      messages,
+      messages: formattedMessages,
       temperature: temp || this.#temp,
     });
     return response.text;
@@ -76,14 +70,14 @@ class LLMClient {
     const queue = new Queue<string>();
     const model = getModel(this.#model);
 
-    messages =
+    const formattedMessages: ModelMessage[] =
       typeof messages === 'string'
         ? [{role: 'user', content: messages}]
         : messages;
 
     const stream = streamText({
       model,
-      messages,
+      messages: formattedMessages,
       temperature: temp || this.#temp,
     });
 
@@ -124,124 +118,113 @@ class LLMClient {
 
   async genTextStream(
     messages: ModelMessage[] | string,
+    tools?: Parameters<typeof streamText>[0]['tools'],
     temp?: number,
-    tools?: Record<string, Tool>,
   ) {
-    console.log('Starting genTextStream with tools:', Object.keys(tools || {}));
-    const queue = new Queue<string | ToolCall>();
+    console.log('[LLMClient] genTextStream called');
+    console.log(
+      '[LLMClient] tools provided:',
+      tools ? Object.keys(tools) : 'none',
+    );
+    console.log('[LLMClient] temperature:', temp || this.#temp);
+
+    const queue = new Queue<string | ToolCallPart | ToolResultPart>();
     const model = getModel(this.#model);
 
-    messages =
+    const formattedMessages: ModelMessage[] =
       typeof messages === 'string'
         ? [{role: 'user', content: messages}]
         : messages;
 
+    console.log(
+      '[LLMClient] formatted messages count:',
+      formattedMessages.length,
+    );
+    console.log(
+      '[LLMClient] last message:',
+      formattedMessages[formattedMessages.length - 1],
+    );
+
+    const stream = streamText({
+      model,
+      messages: formattedMessages,
+      temperature: temp || this.#temp,
+      ...(tools && {tools}),
+    });
+
+    console.log('[LLMClient] stream created, starting data processing');
+
     const data = async () => {
-      let allText = '';
-      let currentMessages = [...messages];
-      const maxIterations = 5;
-      let iteration = 0;
+      console.log('[LLMClient] data() function started');
+      let text = '';
+      let chunkCount = 0;
 
-      while (iteration < maxIterations) {
-        iteration++;
-        console.log(`Iteration ${iteration}`);
+      try {
+        for await (const chunk of stream.fullStream) {
+          chunkCount++;
+          console.log(`[LLMClient] Chunk ${chunkCount} type:`, chunk.type);
 
-        const streamResult = streamText({
-          model,
-          messages: currentMessages,
-          temperature: temp || this.#temp,
-          tools,
-        });
-
-        // Stream text chunks
-        for await (const chunk of streamResult.textStream) {
-          console.log('text chunk');
-          allText += chunk;
-          queue.push(chunk);
+          switch (chunk.type) {
+            case 'text-delta':
+              console.log('[LLMClient] text-delta:', chunk.text.slice(0, 50));
+              text += chunk.text;
+              queue.push(chunk.text);
+              break;
+            case 'tool-call':
+              console.log(
+                '[LLMClient] tool-call:',
+                chunk.toolName,
+                'callId:',
+                chunk.toolCallId,
+              );
+              console.log(
+                '[LLMClient] tool input:',
+                JSON.stringify(chunk.input),
+              );
+              queue.push({
+                type: 'tool-call',
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName,
+                input: chunk.input,
+              } as ToolCallPart);
+              break;
+            case 'tool-result':
+              console.log(
+                '[LLMClient] tool-result:',
+                chunk.toolName,
+                'callId:',
+                chunk.toolCallId,
+              );
+              console.log(
+                '[LLMClient] tool output:',
+                JSON.stringify(chunk.output).slice(0, 100),
+              );
+              queue.push({
+                type: 'tool-result',
+                toolCallId: chunk.toolCallId,
+                toolName: chunk.toolName,
+                input: chunk.input,
+                output: chunk.output,
+              } as ToolResultPart);
+              break;
+            default:
+              console.log(
+                '[LLMClient] unknown chunk type:',
+                (chunk as any).type,
+              );
+          }
         }
 
-        // Wait for tool calls
-        const toolCalls = await streamResult.toolCalls;
-
-        if (toolCalls && toolCalls.length > 0) {
-          console.log(`Executing ${toolCalls.length} tool calls`);
-
-          // Push tool calls to queue for client notification
-          for (const tc of toolCalls) {
-            const toolCall: ToolCall = {
-              toolCallId: tc.toolCallId,
-              toolName: tc.toolName,
-              args: tc.input as Record<string, unknown>,
-            };
-            queue.push(toolCall);
-          }
-
-          // Execute tools and collect results
-          const toolResults: Array<{
-            toolCallId: string;
-            toolName: string;
-            result: unknown;
-          }> = [];
-
-          for (const tc of toolCalls) {
-            const tool = tools?.[tc.toolName];
-            if (tool && tool.execute) {
-              try {
-                console.log(`Executing tool: ${tc.toolName}`);
-                const result = await tool.execute(
-                  tc.input as never,
-                  {} as never,
-                );
-                toolResults.push({
-                  toolCallId: tc.toolCallId,
-                  toolName: tc.toolName,
-                  result,
-                });
-              } catch (error) {
-                console.error(`Error executing tool ${tc.toolName}:`, error);
-                toolResults.push({
-                  toolCallId: tc.toolCallId,
-                  toolName: tc.toolName,
-                  result: {error: String(error)},
-                });
-              }
-            }
-          }
-
-          // Build next messages with tool results
-          currentMessages = [
-            ...currentMessages,
-            {
-              role: 'assistant' as const,
-              content: toolCalls.map(tc => ({
-                type: 'tool-call' as const,
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                input: tc.input,
-              })),
-            } as unknown as ModelMessage,
-            {
-              role: 'tool' as const,
-              content: toolResults.map(tr => ({
-                type: 'tool-result' as const,
-                toolCallId: tr.toolCallId,
-                toolName: tr.toolName,
-                output: JSON.stringify(tr.result),
-              })),
-            } as unknown as ModelMessage,
-          ];
-
-          // Continue to next iteration to get AI's response to tool results
-          continue;
-        } else {
-          // No more tool calls, we're done
-          console.log('No tool calls, finishing');
-          break;
-        }
+        console.log('[LLMClient] Stream completed. Total chunks:', chunkCount);
+        console.log('[LLMClient] Total text length:', text.length);
+      } catch (error) {
+        console.error('[LLMClient] Error in stream processing:', error);
+        throw error;
       }
 
       queue.end();
-      return {text: allText, toolCalls: []};
+      console.log('[LLMClient] Queue ended');
+      return text;
     };
 
     return {queue, data};
@@ -254,14 +237,14 @@ class LLMClient {
   ): Promise<z.infer<T>> {
     const model = getModel(this.#model);
 
-    messages =
+    const formattedMessages: ModelMessage[] =
       typeof messages === 'string'
         ? [{role: 'user', content: messages}]
         : messages;
 
     const {text} = await generateText({
       model,
-      messages,
+      messages: formattedMessages,
       temperature: temp || this.#temp,
     });
     const start = text.trim().indexOf('{');
@@ -282,14 +265,14 @@ class LLMClient {
   ): Promise<{queue: Queue<string>; data: () => Promise<z.infer<T>>}> {
     const model = getModel(this.#model);
 
-    messages =
+    const formattedMessages: ModelMessage[] =
       typeof messages === 'string'
         ? [{role: 'user', content: messages}]
         : messages;
 
     const stream = streamText({
       model,
-      messages,
+      messages: formattedMessages,
       temperature: temp || this.#temp,
     });
     const textStream = stream.textStream;
@@ -336,3 +319,4 @@ class LLMClient {
 }
 
 export default LLMClient;
+export type {ToolCallPart, ToolResultPart};

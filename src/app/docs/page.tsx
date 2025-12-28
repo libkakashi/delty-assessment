@@ -77,7 +77,7 @@ export default function DocumentsPage() {
   }
 
   return (
-    <div className="flex h-[90vh] overflow-hidden">
+    <div className="flex h-[90vh] pl-24 overflow-hidden">
       <div className="flex-1 overflow-y-auto">
         <div className="container mx-auto px-4 py-8 max-w-7xl">
           <div className="flex items-center justify-between mb-8">
